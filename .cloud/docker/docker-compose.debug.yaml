@@ -1,8 +1,28 @@
+name: service-scheduler
+
 services:
-  plugin-template:
-    # For dev we keep the golang container and install devtools
+  service-scheduler:
     build:
-      target: plugin-template
-    image: codeclarityce/template-debug:latest
+      context: ../../
+      dockerfile: .cloud/docker/Dockerfile
+      target: plugin-debug
+      args:
+        KIND: services
+        PLUGINNAME: scheduler
+    depends_on:
+      - rabbitmq
+      - db
+      - adminer
+    env_file:
+      - ../../../../../.cloud/env/.env.dev
+    volumes:
+      - ../../../:/codeclarity/services
+    working_dir: /codeclarity/services/scheduler
     ports:
-      - 40000:40000
+      - "40000:40000"
+    networks:
+      - codeclarity-dev_default
+
+networks:
+  codeclarity-dev_default:
+    external: true
