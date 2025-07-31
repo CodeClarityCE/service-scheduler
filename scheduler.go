@@ -19,27 +19,27 @@ import (
 )
 
 type ScheduledAnalysis struct {
-	bun.BaseModel     `bun:"table:analysis"`
-	ID                string                 `bun:"id,pk"`
-	CreatedOn         time.Time              `bun:"created_on"`
-	Config            map[string]interface{} `bun:"config,type:jsonb"`
-	Stage             int                    `bun:"stage"`
-	Status            string                 `bun:"status"`
-	Steps             interface{}            `bun:"steps,type:jsonb"`
-	StartedOn         *time.Time             `bun:"started_on"`
-	EndedOn           *time.Time             `bun:"ended_on"`
-	Branch            string                 `bun:"branch"`
-	Tag               *string                `bun:"tag"`
-	CommitHash        *string                `bun:"commit_hash"`
-	ScheduleType      *string                `bun:"schedule_type"`
-	NextScheduledRun  *time.Time             `bun:"next_scheduled_run"`
-	IsActive          bool                   `bun:"is_active"`
-	LastScheduledRun  *time.Time             `bun:"last_scheduled_run"`
-	ProjectID         string                 `bun:"projectId"`
-	AnalyzerID        string                 `bun:"analyzerId"`
-	OrganizationID    string                 `bun:"organizationId"`
-	IntegrationID     *string                `bun:"integrationId"`
-	CreatedByID       string                 `bun:"createdById"`
+	bun.BaseModel    `bun:"table:analysis"`
+	ID               string                 `bun:"id,pk"`
+	CreatedOn        time.Time              `bun:"created_on"`
+	Config           map[string]interface{} `bun:"config,type:jsonb"`
+	Stage            int                    `bun:"stage"`
+	Status           string                 `bun:"status"`
+	Steps            interface{}            `bun:"steps,type:jsonb"`
+	StartedOn        *time.Time             `bun:"started_on"`
+	EndedOn          *time.Time             `bun:"ended_on"`
+	Branch           string                 `bun:"branch"`
+	Tag              *string                `bun:"tag"`
+	CommitHash       *string                `bun:"commit_hash"`
+	ScheduleType     *string                `bun:"schedule_type"`
+	NextScheduledRun *time.Time             `bun:"next_scheduled_run"`
+	IsActive         bool                   `bun:"is_active"`
+	LastScheduledRun *time.Time             `bun:"last_scheduled_run"`
+	ProjectID        string                 `bun:"projectId"`
+	AnalyzerID       string                 `bun:"analyzerId"`
+	OrganizationID   string                 `bun:"organizationId"`
+	IntegrationID    *string                `bun:"integrationId"`
+	CreatedByID      string                 `bun:"createdById"`
 }
 
 func (ScheduledAnalysis) TableName() string {
@@ -181,9 +181,9 @@ func (s *Scheduler) processAnalysis(analysis ScheduledAnalysis) {
 
 func (s *Scheduler) createAnalysisExecution(analysis ScheduledAnalysis) (string, error) {
 	// Call the API to create a new analysis execution
-	url := fmt.Sprintf("%s/org/%s/projects/%s/analyses/%s/execute", 
+	url := fmt.Sprintf("%s/org/%s/projects/%s/analyses/%s/execute",
 		s.apiURL, analysis.OrganizationID, analysis.ProjectID, analysis.ID)
-	
+
 	resp, err := http.Post(url, "application/json", nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to call API: %v", err)
@@ -197,7 +197,7 @@ func (s *Scheduler) createAnalysisExecution(analysis ScheduledAnalysis) (string,
 	var result struct {
 		ID string `json:"id"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode response: %v", err)
 	}
