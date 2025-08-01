@@ -2,6 +2,7 @@
     "name": "scheduler",
     "version": "0.0.1",
     "description": "Scheduled analysis service for CodeClarity",
+    "image_name": "codeclarityce/service-scheduler",
     "author": "CodeClarity Team",
     "license": "AGPL-3.0"
 }
