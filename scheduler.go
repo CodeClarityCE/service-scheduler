@@ -77,7 +77,7 @@ func NewScheduler() *Scheduler {
 	queue := getEnv("AMQP_ANALYSES_QUEUE", "api_request")
 
 	// API connection for creating new analysis executions
-	apiURL := getEnv("API_BASE_URL", "http://localhost:3000")
+	apiURL := "http://api:3000"
 
 	// Create cron scheduler
 	c := cron.New(cron.WithSeconds())
