@@ -3,19 +3,15 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/CodeClarityCE/utility-types/boilerplates"
 	"github.com/robfig/cron/v3"
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 type ScheduledAnalysis struct {
@@ -46,59 +42,33 @@ func (ScheduledAnalysis) TableName() string {
 	return "analysis"
 }
 
-type Scheduler struct {
-	db      *bun.DB
-	amqpURL string
-	queue   string
-	cron    *cron.Cron
-	apiURL  string
+// SchedulerService wraps the ServiceBase with scheduler-specific functionality
+type SchedulerService struct {
+	*boilerplates.ServiceBase
+	cron   *cron.Cron
+	apiURL string
 }
 
-func NewScheduler() *Scheduler {
-	// Database connection
-	host := getEnv("PG_DB_HOST", "localhost")
-	port := getEnv("PG_DB_PORT", "6432")
-	user := getEnv("PG_DB_USER", "postgres")
-	password := getEnv("PG_DB_PASSWORD", "password")
-	dbname := getEnv("PG_DB_NAME", "codeclarity")
-
-	dsn := "postgres://" + user + ":" + password + "@" + host + ":" + port + "/" + dbname + "?sslmode=disable"
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
-	db := bun.NewDB(sqldb, pgdialect.New())
-
-	// AMQP connection
-	protocol := getEnv("AMQP_PROTOCOL", "amqp")
-	amqpHost := getEnv("AMQP_HOST", "localhost")
-	amqpPort := getEnv("AMQP_PORT", "5672")
-	amqpUser := getEnv("AMQP_USER", "guest")
-	amqpPassword := getEnv("AMQP_PASSWORD", "guest")
-	amqpURL := protocol + "://" + amqpUser + ":" + amqpPassword + "@" + amqpHost + ":" + amqpPort
-
-	queue := getEnv("AMQP_ANALYSES_QUEUE", "api_request")
-
-	// API connection for creating new analysis executions
-	apiURL := "http://api:3000"
+// CreateSchedulerService creates a new SchedulerService
+func CreateSchedulerService() (*SchedulerService, error) {
+	base, err := boilerplates.CreateServiceBase()
+	if err != nil {
+		return nil, err
+	}
 
 	// Create cron scheduler
 	c := cron.New(cron.WithSeconds())
 
-	return &Scheduler{
-		db:      db,
-		amqpURL: amqpURL,
-		queue:   queue,
-		cron:    c,
-		apiURL:  apiURL,
+	service := &SchedulerService{
+		ServiceBase: base,
+		cron:        c,
+		apiURL:      "http://api:3000", // API connection for creating new analysis executions
 	}
+
+	return service, nil
 }
 
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func (s *Scheduler) Start() {
+func (s *SchedulerService) Start() {
 	log.Println("Starting scheduler service...")
 
 	// Add cron job to check for due analyses every minute
@@ -114,14 +84,14 @@ func (s *Scheduler) Start() {
 	select {}
 }
 
-func (s *Scheduler) processDueAnalyses() {
+func (s *SchedulerService) processDueAnalyses() {
 	log.Println("Checking for due scheduled analyses...")
 
 	ctx := context.Background()
 	var analyses []ScheduledAnalysis
 
 	// Find all due analyses
-	err := s.db.NewSelect().
+	err := s.DB.CodeClarity.NewSelect().
 		Model(&analyses).
 		Where("is_active = ?", true).
 		Where("schedule_type IN (?)", bun.In([]string{"daily", "weekly"})).
@@ -140,7 +110,7 @@ func (s *Scheduler) processDueAnalyses() {
 	}
 }
 
-func (s *Scheduler) processAnalysis(analysis ScheduledAnalysis) {
+func (s *SchedulerService) processAnalysis(analysis ScheduledAnalysis) {
 	log.Printf("Processing scheduled analysis: %s", analysis.ID)
 
 	// Create a new analysis execution to preserve historical results
@@ -164,7 +134,7 @@ func (s *Scheduler) processAnalysis(analysis ScheduledAnalysis) {
 	now := time.Now()
 	nextRun := s.calculateNextRun(analysis.ScheduleType, now)
 
-	_, err = s.db.NewUpdate().
+	_, err = s.DB.CodeClarity.NewUpdate().
 		Model((*ScheduledAnalysis)(nil)).
 		Set("last_scheduled_run = ?", now).
 		Set("next_scheduled_run = ?", nextRun).
@@ -179,7 +149,7 @@ func (s *Scheduler) processAnalysis(analysis ScheduledAnalysis) {
 	log.Printf("Successfully processed analysis %s, new execution: %s, next run: %s", analysis.ID, newAnalysisId, nextRun.Format(time.RFC3339))
 }
 
-func (s *Scheduler) createAnalysisExecution(analysis ScheduledAnalysis) (string, error) {
+func (s *SchedulerService) createAnalysisExecution(analysis ScheduledAnalysis) (string, error) {
 	// Call the API to create a new analysis execution
 	url := fmt.Sprintf("%s/org/%s/projects/%s/analyses/%s/execute",
 		s.apiURL, analysis.OrganizationID, analysis.ProjectID, analysis.ID)
@@ -205,31 +175,7 @@ func (s *Scheduler) createAnalysisExecution(analysis ScheduledAnalysis) (string,
 	return result.ID, nil
 }
 
-func (s *Scheduler) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisId string) error {
-	conn, err := amqp.Dial(s.amqpURL)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		return err
-	}
-	defer ch.Close()
-
-	_, err = ch.QueueDeclare(
-		s.queue, // name
-		true,    // durable
-		false,   // delete when unused
-		false,   // exclusive
-		false,   // no-wait
-		nil,     // arguments
-	)
-	if err != nil {
-		return err
-	}
-
+func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisId string) error {
 	// Create message in the format expected by dispatcher
 	message := map[string]interface{}{
 		"analysis_id":     newAnalysisId,
@@ -244,18 +190,11 @@ func (s *Scheduler) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisI
 		return err
 	}
 
-	return ch.Publish(
-		"",      // exchange
-		s.queue, // routing key
-		false,   // mandatory
-		false,   // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
-		})
+	// Use ServiceBase's SendMessage method
+	return s.SendMessage("api_request", body)
 }
 
-func (s *Scheduler) calculateNextRun(scheduleType *string, from time.Time) time.Time {
+func (s *SchedulerService) calculateNextRun(scheduleType *string, from time.Time) time.Time {
 	if scheduleType == nil {
 		return from.Add(24 * time.Hour) // default to daily
 	}
@@ -271,6 +210,12 @@ func (s *Scheduler) calculateNextRun(scheduleType *string, from time.Time) time.
 }
 
 func main() {
-	scheduler := NewScheduler()
-	scheduler.Start()
+	service, err := CreateSchedulerService()
+	if err != nil {
+		log.Fatalf("Failed to create scheduler service: %v", err)
+	}
+	defer service.Close()
+
+	log.Printf("Starting Scheduler Service...")
+	service.Start()
 }
