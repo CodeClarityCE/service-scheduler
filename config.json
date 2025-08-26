@@ -1,6 +1,6 @@
 {
     "name": "scheduler",
-    "version": "v0.0.3-alpha",
+    "version": "v0.0.4-alpha",
     "description": "Scheduled analysis service for CodeClarity",
     "image_name": "codeclarityce/service-scheduler",
     "author": "CodeClarity Team",
