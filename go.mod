@@ -9,9 +9,9 @@ require (
 )
 
 require (
-	github.com/CodeClarityCE/utility-amqp-helper v0.0.6-alpha // indirect
-	github.com/CodeClarityCE/utility-dbhelper v0.0.8-alpha // indirect
-	github.com/CodeClarityCE/utility-types v0.0.11-alpha // indirect
+	github.com/CodeClarityCE/utility-amqp-helper v0.0.7-alpha // indirect
+	github.com/CodeClarityCE/utility-dbhelper v0.0.9-alpha // indirect
+	github.com/CodeClarityCE/utility-types v0.0.12-alpha // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
