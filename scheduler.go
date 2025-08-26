@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/CodeClarityCE/utility-types/boilerplates"
+	"github.com/CodeClarityCE/utility-boilerplates"
 	"github.com/robfig/cron/v3"
 	"github.com/uptrace/bun"
 )
