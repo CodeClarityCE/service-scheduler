@@ -154,7 +154,14 @@ func (s *SchedulerService) createAnalysisExecution(analysis ScheduledAnalysis) (
 	url := fmt.Sprintf("%s/org/%s/projects/%s/analyses/%s/execute",
 		s.apiURL, analysis.OrganizationID, analysis.ProjectID, analysis.ID)
 
-	resp, err := http.Post(url, "application/json", nil)
+	// Use NewRequest to avoid setting Content-Type header with empty body
+	// (Fastify rejects Content-Type: application/json with no body)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to call API: %v", err)
 	}
