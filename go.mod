@@ -1,6 +1,6 @@
 module github.com/CodeClarityCE/service-scheduler
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/CodeClarityCE/utility-boilerplates v0.0.6-alpha
