@@ -16,26 +16,26 @@ import (
 
 type ScheduledAnalysis struct {
 	bun.BaseModel    `bun:"table:analysis"`
-	ID               string                 `bun:"id,pk"`
-	CreatedOn        time.Time              `bun:"created_on"`
-	Config           map[string]interface{} `bun:"config,type:jsonb"`
-	Stage            int                    `bun:"stage"`
-	Status           string                 `bun:"status"`
-	Steps            interface{}            `bun:"steps,type:jsonb"`
-	StartedOn        *time.Time             `bun:"started_on"`
-	EndedOn          *time.Time             `bun:"ended_on"`
-	Branch           string                 `bun:"branch"`
-	Tag              *string                `bun:"tag"`
-	CommitHash       *string                `bun:"commit_hash"`
-	ScheduleType     *string                `bun:"schedule_type"`
-	NextScheduledRun *time.Time             `bun:"next_scheduled_run"`
-	IsActive         bool                   `bun:"is_active"`
-	LastScheduledRun *time.Time             `bun:"last_scheduled_run"`
-	ProjectID        string                 `bun:"projectId"`
-	AnalyzerID       string                 `bun:"analyzerId"`
-	OrganizationID   string                 `bun:"organizationId"`
-	IntegrationID    *string                `bun:"integrationId"`
-	CreatedByID      string                 `bun:"createdById"`
+	ID               string         `bun:"id,pk"`
+	CreatedOn        time.Time      `bun:"created_on"`
+	Config           map[string]any `bun:"config,type:jsonb"`
+	Stage            int            `bun:"stage"`
+	Status           string         `bun:"status"`
+	Steps            any            `bun:"steps,type:jsonb"`
+	StartedOn        *time.Time     `bun:"started_on"`
+	EndedOn          *time.Time     `bun:"ended_on"`
+	Branch           string         `bun:"branch"`
+	Tag              *string        `bun:"tag"`
+	CommitHash       *string        `bun:"commit_hash"`
+	ScheduleType     *string        `bun:"schedule_type"`
+	NextScheduledRun *time.Time     `bun:"next_scheduled_run"`
+	IsActive         bool           `bun:"is_active"`
+	LastScheduledRun *time.Time     `bun:"last_scheduled_run"`
+	ProjectID        string         `bun:"projectId"`
+	AnalyzerID       string         `bun:"analyzerId"`
+	OrganizationID   string         `bun:"organizationId"`
+	IntegrationID    *string        `bun:"integrationId"`
+	CreatedByID      string         `bun:"createdById"`
 }
 
 func (ScheduledAnalysis) TableName() string {
@@ -184,7 +184,7 @@ func (s *SchedulerService) createAnalysisExecution(analysis ScheduledAnalysis) (
 
 func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisId string) error {
 	// Create message in the format expected by dispatcher
-	message := map[string]interface{}{
+	message := map[string]any{
 		"analysis_id":     newAnalysisId,
 		"project_id":      analysis.ProjectID,
 		"integration_id":  analysis.IntegrationID,
