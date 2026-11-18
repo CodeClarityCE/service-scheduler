@@ -12,7 +12,6 @@ services:
     depends_on:
       - rabbitmq
       - db
-      - adminer
     env_file:
       - ../../../../../.cloud/env/.env.dev
     volumes:
