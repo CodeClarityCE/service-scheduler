@@ -22,3 +22,6 @@
 
 .DS_Store
 tmp
+
+# Local go build output
+/service-scheduler
