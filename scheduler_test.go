@@ -1,18 +1,15 @@
 package main
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
 func TestCreateSchedulerService(t *testing.T) {
 	// Set test environment variables
-	os.Setenv("PG_DB_HOST", "127.0.0.1")
-	os.Setenv("PG_DB_PORT", "5432")
-	os.Setenv("PG_DB_USER", "postgres")
-	os.Setenv("PG_DB_PASSWORD", "!ChangeMe!")
+	t.Setenv("PG_DB_HOST", "127.0.0.1")
+	t.Setenv("PG_DB_PORT", "5432")
+	t.Setenv("PG_DB_USER", "postgres")
+	t.Setenv("PG_DB_PASSWORD", "!ChangeMe!")
 	// Without a database, skip after 1s instead of retrying for the default 120s.
-	os.Setenv("DB_CONNECT_MAX_WAIT_SECONDS", "1")
+	t.Setenv("DB_CONNECT_MAX_WAIT_SECONDS", "1")
 
 	// Test scheduler service creation
 	service, err := CreateSchedulerService()
