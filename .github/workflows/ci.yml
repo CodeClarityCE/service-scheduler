@@ -16,7 +16,7 @@ concurrency:
 jobs:
   go:
     # On the spec branch until the golangci-lint input reaches v1.
-    uses: CodeClarityCE/.github/.github/workflows/go-image.yml@spec/312-beta-readiness
+    uses: CodeClarityCE/.github/.github/workflows/go-image.yml@spec/312-beta
     # Write scopes are for the release jobs only; they run on main when CI_RELEASE is true.
     permissions:
       contents: write
