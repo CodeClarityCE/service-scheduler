@@ -94,7 +94,7 @@ func (s *SchedulerService) processDueAnalyses() {
 	err := s.DB.CodeClarity.NewSelect().
 		Model(&analyses).
 		Where("is_active = ?", true).
-		Where("schedule_type IN (?)", bun.In([]string{"daily", "weekly"})).
+		Where("schedule_type IN (?)", bun.List([]string{"daily", "weekly"})).
 		Where("next_scheduled_run <= ?", time.Now()).
 		Scan(ctx)
 
