@@ -46,6 +46,9 @@ func (ScheduledAnalysis) TableName() string {
 // Schedule types the scheduler runs; "once" analyses are runs, not schedules.
 var recurringTypes = []string{"daily", "weekly"}
 
+// How long one tick may take, so a hung database does not stack up ticks.
+const tickTimeout = 50 * time.Second
+
 // SchedulerService wraps the ServiceBase with scheduler-specific functionality
 type SchedulerService struct {
 	*boilerplates.ServiceBase
@@ -77,7 +80,11 @@ func (s *SchedulerService) Start() {
 	logrus.Info("Starting scheduler service")
 
 	// Check for due analyses every minute
-	_, err := s.cron.AddFunc("0 * * * * *", func() { s.processDueAnalyses(context.Background()) })
+	_, err := s.cron.AddFunc("0 * * * * *", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), tickTimeout)
+		defer cancel()
+		s.processDueAnalyses(ctx)
+	})
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to add cron job")
 	}
@@ -122,21 +129,23 @@ func (s *SchedulerService) processAnalysis(ctx context.Context, analysis Schedul
 		"analysis_id":     analysis.ID,
 		"project_id":      analysis.ProjectID,
 		"organization_id": analysis.OrganizationID,
+		"user_id":         analysis.CreatedByID,
 	})
 
 	now := s.now()
 	nextRun := calculateNextRun(analysis.ScheduleType, now)
 
-	runID, claimed, err := s.claimAndCreateRun(ctx, analysis, now, nextRun)
+	runID, claimed, insertErr, err := s.claimAndCreateRun(ctx, analysis, now, nextRun)
 	if err != nil {
-		log.WithError(err).Error("Failed to create scheduled run")
+		log.WithError(err).Error("Failed to claim scheduled analysis")
 		return
 	}
 	if !claimed {
 		log.Debug("Scheduled analysis already handled for this due time")
 		return
 	}
-	if runID == "" {
+	if insertErr != nil {
+		log.WithError(insertErr).Error("Failed to insert scheduled run; skipping to the next due time")
 		return
 	}
 	log = log.WithField("run_id", runID)
@@ -151,8 +160,8 @@ func (s *SchedulerService) processAnalysis(ctx context.Context, analysis Schedul
 }
 
 // claimAndCreateRun moves the schedule forward and inserts the new run in one transaction.
-// Only one caller can claim a due time; an insert error is logged and the claim still commits.
-func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis ScheduledAnalysis, now, nextRun time.Time) (runID string, claimed bool, err error) {
+// Only one caller can claim a due time; an insert error is returned as insertErr and the claim still commits.
+func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis ScheduledAnalysis, now, nextRun time.Time) (runID string, claimed bool, insertErr error, err error) {
 	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		res, err := tx.NewUpdate().
 			Model((*ScheduledAnalysis)(nil)).
@@ -176,12 +185,7 @@ func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis Sched
 			return fmt.Errorf("savepoint: %w", err)
 		}
 		run := newRun(analysis, now)
-		if _, insertErr := tx.NewInsert().Model(&run).Returning("id").Exec(ctx); insertErr != nil {
-			logrus.WithFields(logrus.Fields{
-				"analysis_id":     analysis.ID,
-				"project_id":      analysis.ProjectID,
-				"organization_id": analysis.OrganizationID,
-			}).WithError(insertErr).Error("Failed to insert scheduled run")
+		if _, insertErr = tx.NewInsert().Model(&run).Returning("id").Exec(ctx); insertErr != nil {
 			_, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT new_run")
 			return err
 		}
@@ -189,12 +193,12 @@ func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis Sched
 		return nil
 	})
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
-	return runID, claimed, nil
+	return runID, claimed, insertErr, nil
 }
 
-// newRun copies a scheduled analysis into a new one-time run, as the API used to.
+// newRun copies a scheduled analysis into a new one-time run.
 func newRun(analysis ScheduledAnalysis, now time.Time) ScheduledAnalysis {
 	once := "once"
 	return ScheduledAnalysis{
@@ -231,10 +235,10 @@ func (s *SchedulerService) failRun(ctx context.Context, log *logrus.Entry, runID
 	}
 }
 
-func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisId string) error {
+func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, runID string) error {
 	// Create message in the format expected by dispatcher
 	message := map[string]any{
-		"analysis_id":     newAnalysisId,
+		"analysis_id":     runID,
 		"project_id":      analysis.ProjectID,
 		"integration_id":  analysis.IntegrationID,
 		"organization_id": analysis.OrganizationID,
@@ -261,7 +265,7 @@ func main() {
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to create scheduler service")
 	}
-	defer service.Close()
+	defer func() { _ = service.Close() }()
 
 	service.Start()
 }

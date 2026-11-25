@@ -20,7 +20,7 @@ func TestCreateSchedulerService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create scheduler service: %v", err)
 	}
-	defer service.Close()
+	defer func() { _ = service.Close() }()
 
 	if service.ServiceBase == nil {
 		t.Error("Expected ServiceBase to be embedded, got nil")
