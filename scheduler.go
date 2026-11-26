@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
 	"time"
 
 	"github.com/CodeClarityCE/utility-boilerplates"
+	codeclarity "github.com/CodeClarityCE/utility-types/codeclarity_db"
 	"github.com/robfig/cron/v3"
+	"github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
 )
 
+// ScheduledAnalysis is the scheduler's view of the analysis table, whose schema the API owns.
 type ScheduledAnalysis struct {
 	bun.BaseModel    `bun:"table:analysis"`
-	ID               string         `bun:"id,pk"`
+	ID               string         `bun:"id,pk,nullzero"`
 	CreatedOn        time.Time      `bun:"created_on"`
 	Config           map[string]any `bun:"config,type:jsonb"`
 	Stage            int            `bun:"stage"`
@@ -31,22 +32,30 @@ type ScheduledAnalysis struct {
 	NextScheduledRun *time.Time     `bun:"next_scheduled_run"`
 	IsActive         bool           `bun:"is_active"`
 	LastScheduledRun *time.Time     `bun:"last_scheduled_run"`
-	ProjectID        string         `bun:"projectId"`
-	AnalyzerID       string         `bun:"analyzerId"`
-	OrganizationID   string         `bun:"organizationId"`
+	ProjectID        string         `bun:"projectId,nullzero"`
+	AnalyzerID       string         `bun:"analyzerId,nullzero"`
+	OrganizationID   string         `bun:"organizationId,nullzero"`
 	IntegrationID    *string        `bun:"integrationId"`
-	CreatedByID      string         `bun:"createdById"`
+	CreatedByID      string         `bun:"createdById,nullzero"`
 }
 
 func (ScheduledAnalysis) TableName() string {
 	return "analysis"
 }
 
+// Schedule types the scheduler runs; "once" analyses are runs, not schedules.
+var recurringTypes = []string{"daily", "weekly"}
+
+// How long one tick may take, so a hung database does not stack up ticks.
+const tickTimeout = 50 * time.Second
+
 // SchedulerService wraps the ServiceBase with scheduler-specific functionality
 type SchedulerService struct {
 	*boilerplates.ServiceBase
-	cron   *cron.Cron
-	apiURL string
+	cron    *cron.Cron
+	db      *bun.DB
+	publish func(queue string, body []byte) error
+	now     func() time.Time
 }
 
 // CreateSchedulerService creates a new SchedulerService
@@ -56,136 +65,186 @@ func CreateSchedulerService() (*SchedulerService, error) {
 		return nil, err
 	}
 
-	// Create cron scheduler
-	c := cron.New(cron.WithSeconds())
-
 	service := &SchedulerService{
 		ServiceBase: base,
-		cron:        c,
-		apiURL:      "http://api:3000", // API connection for creating new analysis executions
+		cron:        cron.New(cron.WithSeconds()),
+		db:          base.DB.CodeClarity,
+		publish:     base.SendMessage,
+		now:         time.Now,
 	}
 
 	return service, nil
 }
 
 func (s *SchedulerService) Start() {
-	log.Println("Starting scheduler service...")
+	logrus.Info("Starting scheduler service")
 
-	// Add cron job to check for due analyses every minute
-	_, err := s.cron.AddFunc("0 * * * * *", s.processDueAnalyses)
+	// Check for due analyses every minute
+	_, err := s.cron.AddFunc("0 * * * * *", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), tickTimeout)
+		defer cancel()
+		s.processDueAnalyses(ctx)
+	})
 	if err != nil {
-		log.Fatalf("Failed to add cron job: %v", err)
+		logrus.WithError(err).Fatal("Failed to add cron job")
 	}
 
 	s.cron.Start()
-	log.Println("Scheduler service started successfully")
+	logrus.Info("Scheduler service started")
 
 	// Keep the service running
 	select {}
 }
 
-func (s *SchedulerService) processDueAnalyses() {
-	log.Println("Checking for due scheduled analyses...")
-
-	ctx := context.Background()
+// dueAnalyses returns the active recurring analyses whose next run is due.
+func (s *SchedulerService) dueAnalyses(ctx context.Context) ([]ScheduledAnalysis, error) {
 	var analyses []ScheduledAnalysis
-
-	// Find all due analyses
-	err := s.DB.CodeClarity.NewSelect().
+	err := s.db.NewSelect().
 		Model(&analyses).
 		Where("is_active = ?", true).
-		Where("schedule_type IN (?)", bun.List([]string{"daily", "weekly"})).
-		Where("next_scheduled_run <= ?", time.Now()).
+		Where("schedule_type IN (?)", bun.List(recurringTypes)).
+		Where("next_scheduled_run <= ?", s.now()).
 		Scan(ctx)
+	return analyses, err
+}
 
+func (s *SchedulerService) processDueAnalyses(ctx context.Context) {
+	analyses, err := s.dueAnalyses(ctx)
 	if err != nil {
-		log.Printf("Error fetching due analyses: %v", err)
+		logrus.WithError(err).Error("Failed to fetch due scheduled analyses")
 		return
 	}
 
-	log.Printf("Found %d due analyses", len(analyses))
+	logrus.WithField("count", len(analyses)).Debug("Found due scheduled analyses")
 
 	for _, analysis := range analyses {
-		s.processAnalysis(analysis)
+		s.processAnalysis(ctx, analysis)
 	}
 }
 
-func (s *SchedulerService) processAnalysis(analysis ScheduledAnalysis) {
-	log.Printf("Processing scheduled analysis: %s", analysis.ID)
+// processAnalysis creates one run for a due scheduled analysis and moves its schedule forward.
+// The schedule moves forward even when the run cannot be created, so a failure is not retried every minute.
+func (s *SchedulerService) processAnalysis(ctx context.Context, analysis ScheduledAnalysis) {
+	log := logrus.WithFields(logrus.Fields{
+		"analysis_id":     analysis.ID,
+		"project_id":      analysis.ProjectID,
+		"organization_id": analysis.OrganizationID,
+		"user_id":         analysis.CreatedByID,
+	})
 
-	// Create a new analysis execution to preserve historical results
-	newAnalysisId, err := s.createAnalysisExecution(analysis)
+	now := s.now()
+	nextRun := calculateNextRun(analysis.ScheduleType, now)
+
+	runID, claimed, insertErr, err := s.claimAndCreateRun(ctx, analysis, now, nextRun)
 	if err != nil {
-		log.Printf("Failed to create new analysis execution for %s: %v", analysis.ID, err)
+		log.WithError(err).Error("Failed to claim scheduled analysis")
+		return
+	}
+	if !claimed {
+		log.Debug("Scheduled analysis already handled for this due time")
+		return
+	}
+	if insertErr != nil {
+		log.WithError(insertErr).Error("Failed to insert scheduled run; skipping to the next due time")
+		return
+	}
+	log = log.WithField("run_id", runID)
+
+	if err := s.sendAnalysisMessage(analysis, runID); err != nil {
+		log.WithError(err).Error("Failed to publish scheduled run")
+		s.failRun(ctx, log, runID)
 		return
 	}
 
-	log.Printf("Created new analysis execution: %s for scheduled analysis: %s", newAnalysisId, analysis.ID)
+	log.WithField("next_run", nextRun.Format(time.RFC3339)).Info("Created scheduled run")
+}
 
-	// Send message to RabbitMQ to trigger the new analysis execution
-	err = s.sendAnalysisMessage(analysis, newAnalysisId)
+// claimAndCreateRun moves the schedule forward and inserts the new run in one transaction.
+// Only one caller can claim a due time; an insert error is returned as insertErr and the claim still commits.
+func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis ScheduledAnalysis, now, nextRun time.Time) (runID string, claimed bool, insertErr error, err error) {
+	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		res, err := tx.NewUpdate().
+			Model((*ScheduledAnalysis)(nil)).
+			Set("last_scheduled_run = ?", now).
+			Set("next_scheduled_run = ?", nextRun).
+			Where("id = ?", analysis.ID).
+			Where("is_active = ?", true).
+			Where("schedule_type IN (?)", bun.List(recurringTypes)).
+			Where("next_scheduled_run <= ?", now).
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("claim schedule: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return err
+		}
+		claimed = true
+
+		// A failed insert rolls back to here, keeping the claim.
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT new_run"); err != nil {
+			return fmt.Errorf("savepoint: %w", err)
+		}
+		run := newRun(analysis, now)
+		if _, insertErr = tx.NewInsert().Model(&run).Returning("id").Exec(ctx); insertErr != nil {
+			_, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT new_run")
+			return err
+		}
+		// Link the run to the same policies as its scheduled analysis.
+		if _, insertErr = tx.ExecContext(ctx, `INSERT INTO policy_analyses_analysis ("policyId", "analysisId")
+			SELECT "policyId", ? FROM policy_analyses_analysis WHERE "analysisId" = ?`, run.ID, analysis.ID); insertErr != nil {
+			_, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT new_run")
+			return err
+		}
+		runID = run.ID
+		return nil
+	})
 	if err != nil {
-		log.Printf("Failed to send analysis message for %s: %v", newAnalysisId, err)
-		return
+		return "", false, nil, err
 	}
+	return runID, claimed, insertErr, nil
+}
 
-	// Update last run time and calculate next run time for the original scheduled analysis
-	ctx := context.Background()
-	now := time.Now()
-	nextRun := s.calculateNextRun(analysis.ScheduleType, now)
+// newRun copies a scheduled analysis into a new one-time run.
+func newRun(analysis ScheduledAnalysis, now time.Time) ScheduledAnalysis {
+	once := "once"
+	return ScheduledAnalysis{
+		CreatedOn:      now,
+		Config:         analysis.Config,
+		Stage:          0,
+		Status:         string(codeclarity.REQUESTED),
+		Steps:          analysis.Steps,
+		Branch:         analysis.Branch,
+		Tag:            analysis.Tag,
+		CommitHash:     analysis.CommitHash,
+		ScheduleType:   &once,
+		IsActive:       true,
+		ProjectID:      analysis.ProjectID,
+		AnalyzerID:     analysis.AnalyzerID,
+		OrganizationID: analysis.OrganizationID,
+		IntegrationID:  analysis.IntegrationID,
+		CreatedByID:    analysis.CreatedByID,
+	}
+}
 
-	_, err = s.DB.CodeClarity.NewUpdate().
+// failRun marks a run nobody will process as failed, so it is not left requested.
+func (s *SchedulerService) failRun(ctx context.Context, log *logrus.Entry, runID string) {
+	_, err := s.db.NewUpdate().
 		Model((*ScheduledAnalysis)(nil)).
-		Set("last_scheduled_run = ?", now).
-		Set("next_scheduled_run = ?", nextRun).
-		Where("id = ?", analysis.ID).
+		Set("status = ?", string(codeclarity.FAILURE)).
+		Set("failure_reason = ?", "The scheduled run could not be queued.").
+		Set("ended_on = ?", s.now()).
+		Where("id = ?", runID).
+		Where("status = ?", string(codeclarity.REQUESTED)).
 		Exec(ctx)
-
 	if err != nil {
-		log.Printf("Failed to update analysis schedule for %s: %v", analysis.ID, err)
-		return
+		log.WithError(err).Error("Failed to mark unqueued scheduled run as failed")
 	}
-
-	log.Printf("Successfully processed analysis %s, new execution: %s, next run: %s", analysis.ID, newAnalysisId, nextRun.Format(time.RFC3339))
 }
 
-func (s *SchedulerService) createAnalysisExecution(analysis ScheduledAnalysis) (string, error) {
-	// Call the API to create a new analysis execution
-	url := fmt.Sprintf("%s/org/%s/projects/%s/analyses/%s/execute",
-		s.apiURL, analysis.OrganizationID, analysis.ProjectID, analysis.ID)
-
-	// Use NewRequest to avoid setting Content-Type header with empty body
-	// (Fastify rejects Content-Type: application/json with no body)
-	req, err := http.NewRequest(http.MethodPost, url, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %v", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to call API: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		ID string `json:"id"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %v", err)
-	}
-
-	return result.ID, nil
-}
-
-func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, newAnalysisId string) error {
+func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, runID string) error {
 	// Create message in the format expected by dispatcher
 	message := map[string]any{
-		"analysis_id":     newAnalysisId,
+		"analysis_id":     runID,
 		"project_id":      analysis.ProjectID,
 		"integration_id":  analysis.IntegrationID,
 		"organization_id": analysis.OrganizationID,
@@ -197,32 +256,22 @@ func (s *SchedulerService) sendAnalysisMessage(analysis ScheduledAnalysis, newAn
 		return err
 	}
 
-	// Use ServiceBase's SendMessage method
-	return s.SendMessage("api_request", body)
+	return s.publish("api_request", body)
 }
 
-func (s *SchedulerService) calculateNextRun(scheduleType *string, from time.Time) time.Time {
-	if scheduleType == nil {
-		return from.Add(24 * time.Hour) // default to daily
-	}
-
-	switch *scheduleType {
-	case "daily":
-		return from.Add(24 * time.Hour)
-	case "weekly":
+func calculateNextRun(scheduleType *string, from time.Time) time.Time {
+	if scheduleType != nil && *scheduleType == "weekly" {
 		return from.Add(7 * 24 * time.Hour)
-	default:
-		return from.Add(24 * time.Hour) // default to daily
 	}
+	return from.Add(24 * time.Hour)
 }
 
 func main() {
 	service, err := CreateSchedulerService()
 	if err != nil {
-		log.Fatalf("Failed to create scheduler service: %v", err)
+		logrus.WithError(err).Fatal("Failed to create scheduler service")
 	}
-	defer service.Close()
+	defer func() { _ = service.Close() }()
 
-	log.Printf("Starting Scheduler Service...")
 	service.Start()
 }
