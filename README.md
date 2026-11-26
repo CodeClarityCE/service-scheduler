@@ -100,9 +100,11 @@ The scheduler integrates with:
    - `is_active = true`
    - `schedule_type` in ['daily', 'weekly']
    - `next_scheduled_run <= now()`
-3. **Claim and Run Creation**: In one transaction, moves `last_scheduled_run` and `next_scheduled_run` forward (so one due time gives one run) and inserts a new `requested` run copied from the scheduled analysis
+3. **Claim and Run Creation**: In one transaction, moves `last_scheduled_run` and `next_scheduled_run` forward (so one due time gives one run) and inserts a new `requested` run copied from the scheduled analysis: its config, steps, branch, tag and commit, its project, analyzer, organization, integration and creator links, and its vulnerability policy links in `policy_analyses_analysis`. If the policy links cannot be written, the run is not created either
 4. **Message Dispatch**: Sends the `api_request` message with the new run's ID; if that fails, the run is marked `failure`
 5. **Failures**: A failed insert or publish is logged and not retried until the next due time
+
+The copy lives in `newRun` and `claimAndCreateRun`. Because the scheduler writes the `analysis` table directly, a new `Analysis` column or relation in the API must be copied here too.
 
 See ADR 0022 in `codeclarity-dev` (`docs/adr/0022-the-scheduler-creates-scheduled-analyses-in-the-database.md`).
 

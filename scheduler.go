@@ -189,6 +189,12 @@ func (s *SchedulerService) claimAndCreateRun(ctx context.Context, analysis Sched
 			_, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT new_run")
 			return err
 		}
+		// Link the run to the same policies as its scheduled analysis.
+		if _, insertErr = tx.ExecContext(ctx, `INSERT INTO policy_analyses_analysis ("policyId", "analysisId")
+			SELECT "policyId", ? FROM policy_analyses_analysis WHERE "analysisId" = ?`, run.ID, analysis.ID); insertErr != nil {
+			_, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT new_run")
+			return err
+		}
 		runID = run.ID
 		return nil
 	})

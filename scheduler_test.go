@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -62,6 +63,13 @@ var analysisSchema = []string{
   "vulnerability_instances_stored_on" timestamp with time zone,
   "vulnerability_instances_have_results" boolean DEFAULT false NOT NULL
 )`,
+	// The policy join table as the baseline creates it, without the policy table and its foreign key.
+	`CREATE TABLE "policy_analyses_analysis" (
+  "policyId" uuid NOT NULL,
+  "analysisId" uuid NOT NULL,
+  PRIMARY KEY ("policyId", "analysisId")
+)`,
+	`ALTER TABLE "policy_analyses_analysis" ADD FOREIGN KEY ("analysisId") REFERENCES analysis(id)`,
 }
 
 const (
@@ -71,6 +79,8 @@ const (
 	orgID         = "44444444-4444-4444-4444-444444444444"
 	integrationID = "55555555-5555-5555-5555-555555555555"
 	userID        = "66666666-6666-6666-6666-666666666666"
+	policyA       = "77777777-7777-7777-7777-777777777777"
+	policyB       = "88888888-8888-8888-8888-888888888888"
 )
 
 type published struct {
@@ -196,6 +206,29 @@ func str(p *string) string {
 	return *p
 }
 
+// linkPolicies links the scheduled analysis to the given policies.
+func linkPolicies(t *testing.T, db *bun.DB, policyIDs ...string) {
+	t.Helper()
+	for _, id := range policyIDs {
+		if _, err := db.ExecContext(context.Background(),
+			`INSERT INTO policy_analyses_analysis ("policyId", "analysisId") VALUES (?, ?)`, id, scheduledID); err != nil {
+			t.Fatalf("link policy: %v", err)
+		}
+	}
+}
+
+// linkedPolicies returns the policy ids linked to an analysis, sorted.
+func linkedPolicies(t *testing.T, db *bun.DB, analysisID string) []string {
+	t.Helper()
+	ids := []string{}
+	err := db.NewRaw(`SELECT "policyId"::text FROM policy_analyses_analysis WHERE "analysisId" = ? ORDER BY 1`, analysisID).
+		Scan(context.Background(), &ids)
+	if err != nil {
+		t.Fatalf("read linked policies: %v", err)
+	}
+	return ids
+}
+
 func wantNextRun(t *testing.T, db *bun.DB, after time.Duration) {
 	t.Helper()
 	sched := scheduled(t, db)
@@ -262,6 +295,40 @@ func TestDueDailyAnalysisCreatesOneRequestedRun(t *testing.T) {
 	}
 }
 
+func TestRunIsLinkedToTheScheduledAnalysisPolicies(t *testing.T) {
+	s, db, _ := testScheduler(t, nil)
+	insertScheduled(t, db, "daily")
+	linkPolicies(t, db, policyA, policyB)
+
+	s.processDueAnalyses(context.Background())
+
+	got := runs(t, db)
+	if len(got) != 1 {
+		t.Fatalf("want 1 new run, got %d", len(got))
+	}
+	if ids := linkedPolicies(t, db, got[0].ID); !slices.Equal(ids, []string{policyA, policyB}) {
+		t.Errorf("want the run linked to %v, got %v", []string{policyA, policyB}, ids)
+	}
+	if ids := linkedPolicies(t, db, scheduledID); len(ids) != 2 {
+		t.Errorf("want the scheduled analysis to keep its 2 policies, got %v", ids)
+	}
+}
+
+func TestRunWithoutPoliciesIsLinkedToNone(t *testing.T) {
+	s, db, _ := testScheduler(t, nil)
+	insertScheduled(t, db, "daily")
+
+	s.processDueAnalyses(context.Background())
+
+	got := runs(t, db)
+	if len(got) != 1 {
+		t.Fatalf("want 1 new run, got %d", len(got))
+	}
+	if ids := linkedPolicies(t, db, got[0].ID); len(ids) != 0 {
+		t.Errorf("want no linked policies, got %v", ids)
+	}
+}
+
 func TestDueWeeklyAnalysisMovesSevenDays(t *testing.T) {
 	s, db, _ := testScheduler(t, nil)
 	insertScheduled(t, db, "weekly")
@@ -297,6 +364,28 @@ func TestInsertFailureStillAdvancesAndSecondTickCreatesNoRun(t *testing.T) {
 	// Refuse every new once run, so the insert fails.
 	if _, err := db.ExecContext(context.Background(),
 		`ALTER TABLE analysis ADD CONSTRAINT no_runs CHECK (schedule_type <> 'once')`); err != nil {
+		t.Fatalf("add constraint: %v", err)
+	}
+
+	s.processDueAnalyses(context.Background())
+	s.processDueAnalyses(context.Background())
+
+	if n := len(runs(t, db)); n != 0 {
+		t.Errorf("want no runs, got %d", n)
+	}
+	if n := len(out.sent()); n != 0 {
+		t.Errorf("want no message, got %d", n)
+	}
+	wantNextRun(t, db, 24*time.Hour)
+}
+
+func TestPolicyLinkFailureRollsBackTheRunAndStillAdvances(t *testing.T) {
+	s, db, out := testScheduler(t, nil)
+	insertScheduled(t, db, "daily")
+	linkPolicies(t, db, policyA)
+	// Refuse every policy link to a new run, so the run insert succeeds and the link fails.
+	if _, err := db.ExecContext(context.Background(), `ALTER TABLE policy_analyses_analysis
+		ADD CONSTRAINT no_run_links CHECK ("analysisId" = '`+scheduledID+`')`); err != nil {
 		t.Fatalf("add constraint: %v", err)
 	}
 
